@@ -1,0 +1,259 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>RAG Frontend</title>
+    <style>
+      body {
+        font-family: Arial;
+        margin: 40px;
+        background: #f4f6f9;
+      }
+      .card {
+        background: white;
+        padding: 20px;
+        margin-bottom: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+      }
+      button {
+        padding: 8px 16px;
+        cursor: pointer;
+      }
+      input[type="text"] {
+        width: 70%;
+        padding: 8px;
+      }
+      .progress {
+        height: 20px;
+        background: #ddd;
+        border-radius: 10px;
+        overflow: hidden;
+        margin-top: 10px;
+      }
+      .progress-bar {
+        height: 100%;
+        width: 0%;
+        background: #4caf50;
+        text-align: center;
+        color: white;
+      }
+      .result {
+        border-bottom: 1px solid #eee;
+        padding: 10px 0;
+      }
+      .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+      }
+      .modal-content {
+        background: white;
+        padding: 20px;
+        margin: 15% auto;
+        width: 300px;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>RAG Application UI</h2>
+
+    <!-- Collection Stats -->
+    <div class="card">
+      <h3>Collection Stats</h3>
+      <p>Total Chunks: <span id="chunkCount">0</span></p>
+      <p>Last Sync: <span id="lastSync">-</span></p>
+      <button onclick="fetchStats()">Refresh Stats</button>
+    </div>
+
+    <!-- File Upload -->
+    <div class="card">
+      <h3>Upload File</h3>
+      <input type="file" id="fileInput" />
+      <button onclick="uploadFile()">Upload</button>
+      <div class="progress">
+        <div class="progress-bar" id="progressBar">0%</div>
+      </div>
+      <p id="uploadStatus"></p>
+    </div>
+
+    <!-- Query Section -->
+    <div class="card">
+      <h3>Ask Question</h3>
+      <input type="text" id="queryInput" placeholder="Enter your query..." />
+      <button onclick="askQuery()">Ask</button>
+    </div>
+
+    <!-- Results -->
+    <div class="card">
+      <h3>Results</h3>
+      <div id="results"></div>
+    </div>
+
+    <!-- Reset -->
+    <div class="card">
+      <button onclick="openModal()">Reset Collection</button>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div class="modal" id="confirmModal">
+      <div class="modal-content">
+        <p>Are you sure you want to reset?</p>
+        <button onclick="resetCollection()">Yes</button>
+        <button onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+
+    <script>
+      const apiBase = window.API_BASE || "http://localhost:5001/api";
+
+      function escapeHtml(s) {
+        if (!s) return "";
+        return String(s).replace(/[&<>\"']/g, function (m) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[m];
+        });
+      }
+
+      async function uploadFile() {
+        const file = document.getElementById("fileInput").files[0];
+        if (!file) return alert("Select a file");
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const progressBar = document.getElementById("progressBar");
+        const status = document.getElementById("uploadStatus");
+
+        progressBar.style.width = "30%";
+        progressBar.innerText = "Embedding via Gemini...";
+
+        const res = await fetch(`${apiBase}/upload`, {
+          method: "POST",
+          body: formData,
+        });
+
+        const data = await res.json();
+        progressBar.style.width = "100%";
+        progressBar.innerText = "100%";
+
+        // Backend returns `chunks` and `chunk_ids`. Show chunk count and first id.
+        const chunks = data.chunks || 0;
+        const firstId =
+          Array.isArray(data.chunk_ids) && data.chunk_ids.length
+            ? data.chunk_ids[0]
+            : null;
+        status.innerText =
+          `Upload successful. Chunks: ${chunks}` +
+          (firstId ? `, first id: ${firstId}` : "");
+        fetchStats();
+      }
+
+      async function askQuery() {
+        const query = document.getElementById("queryInput").value;
+        if (!query) return;
+
+        const resultsDiv = document.getElementById("results");
+        resultsDiv.innerHTML = "<p>Searching and generating answer...</p>";
+
+        try {
+          const res = await fetch(`${apiBase}/answer`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query, top_k: 10 }),
+          });
+
+          const data = await res.json();
+
+          if (!res.ok || !data.answer) {
+            resultsDiv.innerHTML = `<p style="color:red;">Error: ${escapeHtml(data.error || "No answer generated")}</p>`;
+            return;
+          }
+
+          resultsDiv.innerHTML = "";
+
+          // Display synthesized answer prominently
+          const answerDiv = document.createElement("div");
+          answerDiv.style.cssText =
+            "background:#e8f5e9; padding:15px; border-radius:8px; margin-bottom:20px; border-left:4px solid #4caf50";
+          answerDiv.innerHTML = `
+            <h3 style="margin-top:0; color:#2e7d32;">Answer</h3>
+            <p>${escapeHtml(data.answer)}</p>
+          `;
+          resultsDiv.appendChild(answerDiv);
+
+          // Display source chunks below
+          if (data.sources && data.sources.length > 0) {
+            const sourcesDiv = document.createElement("div");
+            sourcesDiv.innerHTML = "<h4>Sources</h4>";
+
+            data.sources.forEach((chunk, idx) => {
+              const div = document.createElement("div");
+              div.className = "result";
+              const score =
+                typeof chunk.similarity_score !== "undefined"
+                  ? chunk.similarity_score
+                  : "N/A";
+              const source = chunk.metadata?.source ?? "unknown";
+              const chunkIdx = chunk.metadata?.chunk_index ?? "-";
+
+              div.innerHTML = `
+        <strong>Source ${idx + 1}:</strong> ${escapeHtml(source)} (Chunk ${chunkIdx}, Score: ${score})<br/>
+        <p style="margin:10px 0; color:#555; font-size:0.9em;">${escapeHtml(chunk.text.substring(0, 200))}...</p>
+      `;
+              sourcesDiv.appendChild(div);
+            });
+            resultsDiv.appendChild(sourcesDiv);
+          }
+        } catch (e) {
+          resultsDiv.innerHTML = `<p style="color:red;">Error: ${escapeHtml(e.message)}</p>`;
+        }
+      }
+
+      async function fetchStats() {
+        try {
+          const res = await fetch(`${apiBase}/stats`);
+          const data = await res.json();
+          if (res.ok && typeof data.total_chunks !== "undefined") {
+            document.getElementById("chunkCount").innerText = data.total_chunks;
+          } else {
+            document.getElementById("chunkCount").innerText = "N/A";
+          }
+          document.getElementById("lastSync").innerText =
+            new Date().toLocaleString();
+        } catch (e) {
+          document.getElementById("chunkCount").innerText = "Error";
+        }
+      }
+
+      function openModal() {
+        document.getElementById("confirmModal").style.display = "block";
+      }
+
+      function closeModal() {
+        document.getElementById("confirmModal").style.display = "none";
+      }
+
+      async function resetCollection() {
+        await fetch(`${apiBase}/reset`, { method: "DELETE" });
+        closeModal();
+        fetchStats();
+        document.getElementById("results").innerHTML = "";
+      }
+
+      // Poll stats every 10 seconds and fetch immediately on load
+      fetchStats();
+      setInterval(fetchStats, 10000);
+    </script>
+  </body>
+</html>
